@@ -4,7 +4,7 @@ import json
 import os
 
 # 1. 讀取清洗後的 EV 數據
-file_path = 'https://raw.githubusercontent.com/smfu0922/Web-Scraping/main/EV%20Charging/ev_scraping_full.xlsx'
+file_path = 'ev_scraping_full.xlsx'
 sheet = 'Cleaned EV Data'
 
 
