@@ -7,7 +7,6 @@ import os
 file_path = r'C:\Users\User\Downloads\ev_scraping_full.xlsx'
 sheet = 'Cleaned EV Data'
 
-
 if not os.path.exists(file_path):
     print(f"錯誤：找不到檔案 {file_path}，請確保檔案在同一個目錄下！")
     exit()
@@ -32,7 +31,40 @@ df['Text'] = df['Text'].fillna('').str.strip()
 df['User'] = df['User'].fillna('匿名用戶').str.strip()
 df['Likes'] = pd.to_numeric(df['Likes'], errors='coerce').fillna(0).astype(int)
 
-# 3. 建立香港地區座標對照字典 (用於 Leaflet.js 地圖)
+
+# 🕒 強大防呆：將 Excel 內各種混亂、整數天數或日期欄位，通通強制清洗為完美的 YYYY-MM-DD
+def clean_to_date_str(val):
+    if pd.isna(val):
+        return '未提及'
+    if isinstance(val, pd.Timestamp):
+        return val.strftime('%Y-%m-%d')
+
+    val_str = str(val).strip()
+    if val_str.lower() in ['nan', 'nat', 'none', '']:
+        return '未提及'
+
+    # 如果是 Excel 拋出來的 5 位數整數天數 (例如 45284)
+    if val_str.isdigit() or (val_str.replace('.', '', 1).isdigit() and float(val_str).is_integer()):
+        try:
+            dt = pd.to_datetime(int(float(val_str)), unit='D', origin='1899-12-30')
+            return dt.strftime('%Y-%m-%d')
+        except:
+            pass
+
+    # 常規 YYYY-MM-DD 或是帶有時間戳格式的通用解析
+    try:
+        dt = pd.to_datetime(val_str, errors='coerce')
+        if not pd.isna(dt):
+            return dt.strftime('%Y-%m-%d')
+    except:
+        pass
+
+    return val_str[:10] if len(val_str) >= 10 and val_str[:4].isdigit() else val_str
+
+
+df['Formatted_Time'] = df['Time'].apply(clean_to_date_str)
+
+# 3. 建立香港地區座標對照字典
 geo_dict = {
     '荃灣': [22.3686, 114.1114], '荃灣京匯中心': [22.3703, 114.1122], '海之戀': [22.3670, 114.1110],
     '荃灣馬角街18號': [22.3655, 114.1171],
@@ -57,7 +89,6 @@ geo_dict = {
     '西貢': [22.3830, 114.2700], '龍蝦灣': [22.3160, 114.2900]
 }
 
-# 預設香港中心坐標
 HK_CENTER = [22.3527, 114.1272]
 
 records = []
@@ -65,11 +96,10 @@ for idx, row in df.iterrows():
     loc_name = row['Location']
     coords = geo_dict.get(loc_name, HK_CENTER if loc_name != '未提及' and loc_name != '香港' else None)
 
-    # \-- removed 'user' field to delete 發文者名稱 column in the frontend table
     records.append({
         "id": int(row['ID']),
         "source": row['Source'],
-        "time": str(row['Time']),
+        "time": row['Formatted_Time'],  # 完美的 YYYY-MM-DD
         "text": row['Text'],
         "emotion_basic": row['Emotion'],
         "emotion_detailed": row['Emotion_Detail'],
@@ -82,10 +112,8 @@ for idx, row in df.iterrows():
         "likes": int(row['Likes'])
     })
 
-# 將數據轉換為前端讀取的 JSON 字串
 json_data = json.dumps(records, ensure_ascii=False)
 
-# 4. 產生單個自包含的 HTML 檔案
 html_content = f"""<!DOCTYPE html>
 <html lang="zh-HK">
 <head>
@@ -98,7 +126,6 @@ html_content = f"""<!DOCTYPE html>
     <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 
     <style>
-        /* 專屬色調調配 */
         :root {{
             --color-beige: #dcd8bc;
             --color-red: #85443f;
@@ -123,10 +150,18 @@ html_content = f"""<!DOCTYPE html>
         .active-btn-red {{ background-color: var(--color-red) !important; color: white !important; }}
         .active-btn-black {{ background-color: var(--color-black) !important; color: white !important; }}
 
-        /* 隱藏捲軸 */
         ::-webkit-scrollbar {{ width: 6px; height: 6px; }}
         ::-webkit-scrollbar-track {{ background: #f1f1f1; }}
         ::-webkit-scrollbar-thumb {{ background: #c1c1c1; border-radius: 3px; }}
+
+        .date-picker-input {{
+            border: 1px solid #d1d5db;
+            padding: 6px 12px;
+            border-radius: 8px;
+            background-color: #ffffff;
+            font-size: 13px;
+            outline: none;
+        }}
     </style>
 </head>
 <body class="p-4 md:p-6">
@@ -142,6 +177,24 @@ html_content = f"""<!DOCTYPE html>
             數據總量: <span id="total-count-badge" class="font-bold text-yellow-300">0</span> 筆篩選中
         </div>
     </header>
+
+    <div class="mb-6 grid grid-cols-1 lg:grid-cols-12 gap-4 border border-gray-200 p-4 rounded-xl bg-white shadow-xs">
+        <div class="lg:col-span-8 border-r border-gray-100 pr-2">
+            <div class="text-xs font-bold text-gray-500 mb-2 flex justify-between items-center">
+                <span>📊 歷史全期發文日期分佈趨勢 (純視覺對照)</span>
+                <span class="text-[10px] bg-gray-100 px-1.5 py-0.5 rounded text-gray-400 font-normal">不引入交互</span>
+            </div>
+            <div class="relative w-full h-32">
+                <canvas id="staticTrendChart"></canvas>
+            </div>
+        </div>
+        <div class="lg:col-span-4 flex flex-col justify-between">
+            <div class="text-xs font-bold text-gray-500 mb-2">🍕 全期輿情情緒基本盤比例佔比</div>
+            <div class="relative w-full h-28 flex justify-center items-center">
+                <canvas id="staticPieChart"></canvas>
+            </div>
+        </div>
+    </div>
 
     <section class="mb-6 p-5 bg-white rounded-xl shadow-xs border border-gray-200">
         <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-4 flex items-center gap-1.5">
@@ -160,14 +213,12 @@ html_content = f"""<!DOCTYPE html>
 
             <div class="lg:col-span-7">
                 <label class="block text-sm font-medium text-gray-700 mb-2 font-bold">細分語氣情緒 (Emotion Detailed) <span class="text-xs font-normal text-gray-400">(點擊可多選或複選組合)</span></label>
-                <div id="emotion-detailed-container" class="flex flex-wrap gap-2">
-                    </div>
+                <div id="emotion-detailed-container" class="flex flex-wrap gap-2"></div>
             </div>
         </div>
     </section>
 
     <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 mb-6">
-
         <div class="lg:col-span-5 flex flex-col gap-6">
             <div class="bg-white p-5 rounded-xl shadow-xs border border-gray-200 flex-1 flex flex-col">
                 <div class="flex justify-between items-center mb-4">
@@ -233,6 +284,18 @@ html_content = f"""<!DOCTYPE html>
             <div id="status-detail" class="bg-gray-200 px-2 py-0.5 rounded">細分情緒: 全部</div>
             <div id="status-theme" class="bg-gray-200 px-2 py-0.5 rounded">主題鎖定: 無</div>
             <div id="status-loc" class="bg-gray-200 px-2 py-0.5 rounded">地點鎖定: 無</div>
+            <div id="status-time" class="bg-gray-200 px-2 py-0.5 rounded">時間區間: 全部</div>
+        </div>
+
+        <div class="mb-4 p-3 bg-gray-50 rounded-xl border border-gray-200 flex flex-wrap items-center gap-3">
+            <span class="text-xs font-bold text-gray-700">📅 歷史時間軸穿透過濾 (YYYY-MM-DD)：</span>
+            <div class="flex items-center gap-2 text-xs">
+                <span>從</span>
+                <input type="date" id="calendar-start" class="date-picker-input" onchange="handleDateFilterChange()" />
+                <span>至</span>
+                <input type="date" id="calendar-end" class="date-picker-input" onchange="handleDateFilterChange()" />
+                <button onclick="clearCalendarFilter()" class="bg-gray-200 hover:bg-gray-300 text-gray-700 px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer">清除日期</button>
+            </div>
         </div>
 
         <div class="overflow-x-auto max-h-[500px] overflow-y-auto border border-gray-200 rounded-lg">
@@ -240,6 +303,7 @@ html_content = f"""<!DOCTYPE html>
                 <thead>
                     <tr class="bg-gray-50 border-b border-gray-200 text-gray-700 text-xs font-bold uppercase tracking-wider sticky top-0 z-20">
                         <th class="p-3 w-16 text-center">編號</th>
+                        <th class="p-3 w-40">時間 (Time)</th>
                         <th class="p-3 w-32">發言社群來源</th>
                         <th class="p-3 w-28 text-center">情緒傾向</th>
                         <th class="p-3 w-28 text-center">提及地點</th>
@@ -247,17 +311,14 @@ html_content = f"""<!DOCTYPE html>
                         <th class="p-3 w-20 text-center">讚數</th>
                     </tr>
                 </thead>
-                <tbody id="raw-data-table-body" class="text-sm divide-y divide-gray-100">
-                    </tbody>
+                <tbody id="raw-data-table-body" class="text-sm divide-y divide-gray-100"></tbody>
             </table>
         </div>
     </section>
 
     <script>
-        // 5. 注入由 Python 過濾處理後的原始 JSON 數據
         const rawData = {json_data};
 
-        // 配色方案常量
         const PALETTE = {{
             beige: '#dcd8bc',
             red: '#85443f',
@@ -266,27 +327,103 @@ html_content = f"""<!DOCTYPE html>
             blue: '#6fa8dc'
         }};
 
-        // 全域當前選取篩選器狀態
         let currentBasicEmotion = '全部';
         let selectedDetailedEmotions = [];
         let clickedTheme = null;
         let clickedLocation = null;
 
-        // 圖表與地圖變數實例
+        let filterStartDate = null;
+        let filterEndDate = null;
+
         let themeChartInstance = null;
         let modelChartInstance = null;
         let competitorChartInstance = null;
         let mapInstance = null;
         let markerLayerGroup = null;
 
-        // 初始化
         window.addEventListener('DOMContentLoaded', () => {{
             initDetailedEmotionFilters();
             initLeafletMap();
+            buildStaticVisuals(); // 在此加載最頂端的歷史大盤
             applyCrossFilters();
         }});
 
-        // 生成詳細情緒的多選標籤
+        // 🎨 構建最頂層歷史宏觀看板 (70% 歷史時間趨勢 + 30% 情緒比例，無視覺交互)
+        function buildStaticVisuals() {{
+            const months = rawData.map(d => {{
+                let t = d.time ? d.time.trim() : '';
+                return (t.length >= 7) ? t.substring(0, 7) : null;
+            }}).filter(m => m && m.match(/^\d{{4}}-\d{{2}}$/)).sort();
+
+            if (months.length === 0) return;
+
+            const minMonth = months[0];
+            const maxMonth = months[months.length - 1];
+
+            const monthCounts = {{}};
+            months.forEach(m => {{ monthCounts[m] = (monthCounts[m] || 0) + 1; }});
+
+            const uniqueMonths = [...new Set(months)];
+            const chartLabels = uniqueMonths;
+            const chartData = uniqueMonths.map(m => monthCounts[m]);
+
+            // 1. 繪製 70% 歷史月度分佈
+            const trendCtx = document.getElementById('staticTrendChart').getContext('2d');
+            new Chart(trendCtx, {{
+                type: 'bar',
+                data: {{
+                    labels: chartLabels,
+                    datasets: [{{
+                        label: `發文總量 (${{minMonth}} 至 ${{maxMonth}})`,
+                        data: chartData,
+                        backgroundColor: '#dcd8bc95',
+                        borderColor: '#58595b',
+                        borderWidth: 1,
+                        borderRadius: 3,
+                        maxBarThickness: 20
+                    }}]
+                }},
+                options: {{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {{ legend: {{ display: true, labels: {{ boxWidth: 10, font: {{ size: 10 }} }} }} }},
+                    scales: {{
+                        x: {{ grid: {{ display: false }}, ticks: {{ font: {{ size: 9 }} }} }},
+                        y: {{ grid: {{ color: '#f3f4f6' }}, ticks: {{ font: {{ size: 9 }}, precision: 0 }} }}
+                    }}
+                }}
+            }});
+
+            // 2. 統計全期基本傾向數據
+            let posCount = 0, neuCount = 0, negCount = 0;
+            rawData.forEach(d => {{
+                if (d.emotion_basic === '正面') posCount++;
+                else if (d.emotion_basic === '負面') negCount++;
+                else neuCount++;
+            }});
+
+            // 3. 繪製 30% 基本情感大盤圓餅圖
+            const pieCtx = document.getElementById('staticPieChart').getContext('2d');
+            new Chart(pieCtx, {{
+                type: 'pie',
+                data: {{
+                    labels: ['正面', '中性', '負面'],
+                    datasets: [{{
+                        data: [posCount, neuCount, negCount],
+                        backgroundColor: [PALETTE.green, '#e5e7eb', PALETTE.red],
+                        borderWidth: 1
+                    }}]
+                }},
+                options: {{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {{
+                        legend: {{ position: 'right', labels: {{ boxWidth: 8, font: {{ size: 9 }} }} }}
+                    }}
+                }}
+            }});
+        }}
+
         function initDetailedEmotionFilters() {{
             const details = [...new Set(rawData.map(d => d.emotion_detailed))].filter(Boolean);
             const container = document.getElementById('emotion-detailed-container');
@@ -302,7 +439,6 @@ html_content = f"""<!DOCTYPE html>
             }});
         }}
 
-        // 初始化地圖
         function initLeafletMap() {{
             mapInstance = L.map('map').setView([22.3527, 114.1272], 11);
             L.tileLayer('https://{{s}}.basemaps.cartocdn.com/light_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{
@@ -312,11 +448,9 @@ html_content = f"""<!DOCTYPE html>
             markerLayerGroup = L.layerGroup().addTo(mapInstance);
         }}
 
-        // 切換基本情緒狀態
         function toggleBasicEmotion(type) {{
             currentBasicEmotion = type;
 
-            // 重置按鈕視覺樣式
             document.getElementById('eb-all').className = "flex-1 py-2.5 px-4 rounded-lg font-medium text-sm border border-gray-300 cursor-pointer text-center bg-white text-gray-700 hover:bg-gray-50";
             document.getElementById('eb-pos').className = "flex-1 py-2.5 px-4 rounded-lg font-medium text-sm border border-gray-200 cursor-pointer text-center bg-white text-gray-700 hover:bg-gray-50";
             document.getElementById('eb-neu').className = "flex-1 py-2.5 px-4 rounded-lg font-medium text-sm border border-gray-200 cursor-pointer text-center bg-white text-gray-700 hover:bg-gray-50";
@@ -330,7 +464,6 @@ html_content = f"""<!DOCTYPE html>
             applyCrossFilters();
         }}
 
-        // 切換詳細情緒複選狀態
         function toggleDetailedEmotion(det) {{
             const idx = selectedDetailedEmotions.indexOf(det);
             const btn = document.getElementById(`ed-${{det}}`);
@@ -345,20 +478,36 @@ html_content = f"""<!DOCTYPE html>
             applyCrossFilters();
         }}
 
-        // 重置所有圖表點擊鎖定
+        function handleDateFilterChange() {{
+            filterStartDate = document.getElementById('calendar-start').value || null;
+            filterEndDate = document.getElementById('calendar-end').value || null;
+            applyCrossFilters();
+        }}
+
+        function clearCalendarFilter() {{
+            filterStartDate = null;
+            filterEndDate = null;
+            document.getElementById('calendar-start').value = '';
+            document.getElementById('calendar-end').value = '';
+            applyCrossFilters();
+        }}
+
         function resetAllFilters() {{
             clickedTheme = null;
             clickedLocation = null;
             currentBasicEmotion = '全部';
             selectedDetailedEmotions = [];
+            filterStartDate = null;
+            filterEndDate = null;
+
+            document.getElementById('calendar-start').value = '';
+            document.getElementById('calendar-end').value = '';
 
             toggleBasicEmotion('全部');
             initDetailedEmotionFilters();
         }}
 
-        // 核心動態數據交叉運算與渲染
         function applyCrossFilters() {{
-            // 1. 執行多重條件聯合篩選
             let filtered = rawData;
 
             if (currentBasicEmotion !== '全部') {{
@@ -374,32 +523,32 @@ html_content = f"""<!DOCTYPE html>
                 filtered = filtered.filter(d => d.location === clickedLocation);
             }}
 
-            // 更新狀態顯示條與徽章計數
+            if (filterStartDate) {{
+                filtered = filtered.filter(d => d.time && d.time >= filterStartDate);
+            }}
+            if (filterEndDate) {{
+                filtered = filtered.filter(d => d.time && d.time <= filterEndDate);
+            }}
+
             document.getElementById('total-count-badge').innerText = filtered.length;
             document.getElementById('status-basic').innerText = `基本情緒: ${{currentBasicEmotion}}`;
             document.getElementById('status-detail').innerText = `細分情緒: ${{selectedDetailedEmotions.length ? selectedDetailedEmotions.join(', ') : '全部'}}`;
             document.getElementById('status-theme').innerText = `主題鎖定: ${{clickedTheme ? clickedTheme : '無'}}`;
             document.getElementById('status-loc').innerText = `地點鎖定: ${{clickedLocation ? clickedLocation : '無'}}`;
+            document.getElementById('status-time').innerText = `時間區間: ${{filterStartDate || '全期'}} ~ ${{filterEndDate || '全期'}}`;
 
-            // 2. 重新計算三大圖表的聚合統計量
             renderThemeChart(filtered);
             renderModelChart(filtered);
             renderCompetitorChart(filtered);
-
-            // 3. 重新渲染地圖座標大頭針
             renderMapMarkers(filtered);
-
-            // 4. 更新底部的明細穿透列表
             renderDataTable(filtered);
         }}
 
-        // 統計物件聚合小助手
         function getCounts(array, key) {{
             const counts = {{}};
             array.forEach(item => {{
                 let val = item[key];
                 if (!val || val === 'null' || val === '未提及') return;
-                // 有些多模型混合拆開
                 let parts = val.split(',').map(p => p.trim());
                 parts.forEach(p => {{
                     if(p === 'null' || !p) return;
@@ -409,28 +558,22 @@ html_content = f"""<!DOCTYPE html>
             return Object.entries(counts).sort((a,b) => b[1] - a[1]);
         }}
 
-        // 渲染主題橫向長條圖 (具有可點擊回鎖交互能力)
         function renderThemeChart(data) {{
             const sortedData = getCounts(data, 'theme');
             const labels = sortedData.map(d => d[0]);
             const counts = sortedData.map(d => Number(d[1] || 0));
 
-            // 動態決定長條色調 (decide color first)
             let barColor = PALETTE.blue;
             if (currentBasicEmotion === '正面') barColor = PALETTE.green;
             if (currentBasicEmotion === '負面') barColor = PALETTE.red;
 
-            // Update the theme badge to show the bar-chart total and match chart color
             const themeTotal = counts.reduce((s, n) => s + n, 0);
             const badgeEl = document.getElementById('theme-count-badge');
             if (badgeEl) {{
                 badgeEl.innerText = `${{themeTotal}}`;
                 badgeEl.style.backgroundColor = barColor;
-                badgeEl.style.color = '#fff';
-                badgeEl.style.borderColor = barColor;
             }}
 
-            // If no theme labels, destroy existing chart and exit (badge already updated)
             if (labels.length === 0) {{
                 if (themeChartInstance) themeChartInstance.destroy();
                 themeChartInstance = null;
@@ -470,7 +613,6 @@ html_content = f"""<!DOCTYPE html>
             }});
         }}
 
-        // 渲染車款長條圖
         function renderModelChart(data) {{
             const sortedData = getCounts(data, 'model').slice(0, 8);
             const labels = sortedData.map(d => d[0]);
@@ -499,7 +641,6 @@ html_content = f"""<!DOCTYPE html>
             }});
         }}
 
-        // 渲染競爭對手長條圖
         function renderCompetitorChart(data) {{
             const sortedData = getCounts(data, 'competitor').slice(0, 8);
             const labels = sortedData.map(d => d[0]);
@@ -528,11 +669,9 @@ html_content = f"""<!DOCTYPE html>
             }});
         }}
 
-        // 動態重繪地圖上的點標記
         function renderMapMarkers(data) {{
             markerLayerGroup.clearLayers();
 
-            // 建立地點計數物件
             const locCounts = {{}};
             data.forEach(d => {{
                 if(d.coords && d.location && d.location !== '未提及' && d.location !== '香港') {{
@@ -543,9 +682,7 @@ html_content = f"""<!DOCTYPE html>
                 }}
             }});
 
-            // 地圖大頭針標記生成
             Object.entries(locCounts).forEach(([name, info]) => {{
-                // 決定大頭針徽章顏色
                 let badgeColor = PALETTE.blue;
                 if (currentBasicEmotion === '正面') badgeColor = PALETTE.green;
                 if (currentBasicEmotion === '負面') badgeColor = PALETTE.red;
@@ -566,13 +703,12 @@ html_content = f"""<!DOCTYPE html>
             }});
         }}
 
-        // 穿透式明細表格數據渲染更新
         function renderDataTable(data) {{
             const tbody = document.getElementById('raw-data-table-body');
             tbody.innerHTML = '';
 
             if(data.length === 0) {{
-                tbody.innerHTML = `<tr><td colspan="6" class="p-8 text-center text-gray-400 font-medium">沒有符合當前動態交叉篩選條件的發文數據。</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="7" class="p-8 text-center text-gray-400 font-medium">沒有符合當前動態交叉篩選條件的發文數據。</td></tr>`;
                 return;
             }}
 
@@ -584,8 +720,10 @@ html_content = f"""<!DOCTYPE html>
 
                 const tr = document.createElement('tr');
                 tr.className = "hover:bg-gray-50/80 transition-colors";
+
                 tr.innerHTML = `
                     <td class="p-3 text-center text-gray-500 font-mono text-xs">${{row.id}}</td>
+                    <td class="p-3 text-xs font-semibold text-gray-600 font-mono">${{row.time}}</td>
                     <td class="p-3 text-xs font-medium text-gray-600" title="${{row.source}}" style="min-width:130px; max-width:260px; white-space:normal;">${{row.source}}</td>
                     <td class="p-3 text-center" style="width:180px; min-width:180px;">${{emotionBadge}}</td>
                     <td class="p-3 text-center font-medium text-gray-600 text-xs">${{row.location !== '未提及' ? '📍 ' + row.location : '<span class="text-gray-300">-</span>'}}</td>
@@ -601,12 +739,13 @@ html_content = f"""<!DOCTYPE html>
 """
 
 # 將整合後的程式碼寫入本地檔案
-output_filename = "ev_dashboard.html"
+output_filename = "ev_dashboard_new.html"
 with open(output_filename, "w", encoding="utf-8") as f:
     f.write(html_content)
 
 print("\n" + "=" * 50)
-print(f"🎉 儀表板 HTML 檔案已成功生成！")
-print(f"檔案名稱：{output_filename}")
-print(f"使用方法：直接在任何瀏覽器中雙擊打開 `{output_filename}` 即可開始使用全功能交互。")
+print(f"🎉 頂層歷史大盤位置更換與日期清洗完畢！")
+print(f"1. 70%-30% 的歷史趨勢柱狀圖與情緒比例圓餅圖，已完美挪移至黑色標題 (Header) 正下方。")
+print(f"2. 表格 (Table) 的時間全量轉換為標準且純淨的『YYYY-MM-DD』，徹底消滅混亂的 Excel int 數字格式。")
+print(f"3. 核心可動態操控控制區完美相連，交互順暢無比。")
 print("=" * 50 + "\n")
